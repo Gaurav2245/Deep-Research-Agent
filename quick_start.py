@@ -135,6 +135,5 @@ Check the database:
 
 Read more:
   • API_INTEGRATION_READY.md - Full integration guide
-  • test_api_integration.py - Full test suite
   • LAYERED_MEMORY_ARCHITECTURE.md - Design details
 """)
