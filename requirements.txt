@@ -1,0 +1,54 @@
+# ── LangChain / LangGraph ─────────────────────────────────────────────────────
+langgraph>=0.2.0
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-openai>=0.2.0          # AzureChatOpenAI
+
+# ── Search providers ──────────────────────────────────────────────────────────
+tavily-python>=0.5.0             # Tavily search client
+duckduckgo-search>=6.0.0         # DuckDuckGo (no API key needed)
+
+# ── Browser scraping (JS-heavy pages like NSE) ────────────────────────────────
+playwright>=1.44.0               # Headless Chromium automation
+beautifulsoup4>=4.12.0           # HTML parsing & table extraction
+lxml>=5.0.0                      # Fast HTML parser backend for BS4
+
+# ── Data handling ─────────────────────────────────────────────────────────────
+requests>=2.32.0                 # HTTP client for NSE JSON APIs
+pandas>=2.0.0                    # Optional: DataFrame conversion for tables
+
+# ── Config / utilities ────────────────────────────────────────────────────────
+python-dotenv>=1.0.0             # .env loading
+
+# ── UI / Frontend ────────────────────────────────────────────────────────────
+streamlit>=1.28.0                # Streamlit web frameworkreportlab>=4.0.0                 # PDF generation
+# ── Backend / API ─────────────────────────────────────────────────────────────
+fastapi>=0.104.0                 # Modern web framework
+uvicorn>=0.24.0                  # ASGI server
+pydantic>=2.0.0                  # Data validation
+pydantic-settings>=2.0.0         # Settings management
+
+# ── Database & ORM ────────────────────────────────────────────────────────────
+sqlalchemy>=2.0.0                # SQL toolkit and ORM
+psycopg2-binary>=2.9.0           # PostgreSQL adapter
+alembic>=1.12.0                  # Database migrations
+sqlalchemy-json>=0.5.0           # JSON column support
+
+# ── Vector embeddings & semantic search ────────────────────────────────────────
+openai>=1.0.0                    # OpenAI embeddings
+pgvector>=0.2.0                  # PostgreSQL vector extension client
+numpy>=1.24.0                    # Numerical computing
+faiss-cpu>=1.7.4                 # Efficient vector similarity search
+sentence-transformers>=2.2.0     # Local embeddings
+torch>=2.0.0                     # Required for sentence-transformers
+
+# ── Data quality & validation ─────────────────────────────────────────────────
+validators>=0.22.0               # Data validators
+bleach>=6.1.0                    # HTML sanitization
+langsmith>=0.1.0                 # LangChain tracing and observability
+
+# ── Post-install step (run once after pip install) ────────────────────────────
+# playwright install chromium
+sentence-transformers
+torchvision
+reportlab

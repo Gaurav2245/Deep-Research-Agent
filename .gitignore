@@ -1,0 +1,29 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+myenv/
+venv/
+.env*
+
+# VS Code
+.vscode/
+
+# Logs and runtime files
+*.log
+*.sqlite3
+*.db
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Test caches
+.pytest_cache/
+
+# System files
+.DS_Store
+Thumbs.db
