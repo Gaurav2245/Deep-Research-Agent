@@ -50,7 +50,10 @@ INDEX_MAP: Dict[str, str] = {
 }
 
 ENDPOINTS: Dict[str, str] = {
-    "index":        "/api/equity-stockIndices?index={index}",
+    # NSE retired /api/equity-stockIndices (per-stock breakdown of an index) —
+    # it now 404s regardless of auth. /api/allIndices returns a summary for
+    # every index in one call; we fetch it and filter client-side instead.
+    "index":        "/api/allIndices",
     "quote":        "/api/quote-equity?symbol={symbol}",
     "option_chain": "/api/option-chain-indices?symbol={symbol}",
     "gainers":      "/api/live-analysis-variations?index=gainers",
@@ -215,28 +218,36 @@ class NSETool(BaseSearchTool):
         raise RuntimeError(f"NSE API unavailable after {self._cfg.max_retries} attempts: {url}")
 
     def _fetch_index(self, index_name: str, original_query: str) -> SearchResponse:
-        path = ENDPOINTS["index"].format(index=quote(index_name))
-        data = self._get(path)
-
+        """
+        Live index snapshot via /api/allIndices (fetches every index in one
+        call; NSE retired the old per-index /api/equity-stockIndices lookup).
+        """
+        data = self._get(ENDPOINTS["index"])
         records = data.get("data", [])
-        table_md = _records_to_markdown(
-            records,
-            columns=["symbol", "lastPrice", "change", "pChange", "totalTradedVolume"],
-            headers=["Symbol", "Last Price", "Change", "% Change", "Volume"],
-        )
 
-        summary = data.get("metadata", {})
-        advance = data.get("advance", {})
+        record = next(
+            (r for r in records if str(r.get("index", "")).upper() == index_name.upper()),
+            None,
+        )
+        if record is None:
+            raise RuntimeError(f"NSE has no index matching '{index_name}' (not an NSE-listed index?)")
 
         content = (
             f"## {index_name} — Live Snapshot\n\n"
-            f"**Last:** {summary.get('last', 'N/A')}  "
-            f"**Change:** {summary.get('change', 'N/A')} "
-            f"({summary.get('percentChange', 'N/A')}%)\n"
-            f"**Advances:** {advance.get('advances', 'N/A')}  "
-            f"**Declines:** {advance.get('declines', 'N/A')}  "
-            f"**Unchanged:** {advance.get('unchanged', 'N/A')}\n\n"
-            f"{table_md}"
+            f"**Last:** {record.get('last', 'N/A')}  "
+            f"**Change:** {record.get('variation', 'N/A')} "
+            f"({record.get('percentChange', 'N/A')}%)\n"
+            f"**Open:** {record.get('open', 'N/A')}  "
+            f"**High:** {record.get('high', 'N/A')}  "
+            f"**Low:** {record.get('low', 'N/A')}  "
+            f"**Prev Close:** {record.get('previousClose', 'N/A')}\n"
+            f"**Advances:** {record.get('advances', 'N/A')}  "
+            f"**Declines:** {record.get('declines', 'N/A')}  "
+            f"**Unchanged:** {record.get('unchanged', 'N/A')}\n\n"
+            f"**52W High:** {record.get('yearHigh', 'N/A')}  "
+            f"**52W Low:** {record.get('yearLow', 'N/A')}  "
+            f"**P/E:** {record.get('pe', 'N/A')}  "
+            f"**P/B:** {record.get('pb', 'N/A')}\n"
         )
 
         return _make_response(original_query, f"{index_name} Index", NSE_BASE, content)
@@ -311,9 +322,18 @@ class NSETool(BaseSearchTool):
             data.get("NIFTY", {}).get("data", [])
             or data.get("data", [])
         )
+        # /api/live-analysis-variations uses different field names than the
+        # equity-stockIndices endpoint (ltp/perChange/trade_quantity, not
+        # lastPrice/pChange/totalTradedVolume) and has no absolute "change"
+        # field at all — it must be derived from ltp - prev_price.
+        for r in records:
+            ltp = r.get("ltp")
+            prev = r.get("prev_price")
+            r["computed_change"] = round(ltp - prev, 2) if isinstance(ltp, (int, float)) and isinstance(prev, (int, float)) else ""
+
         table_md = _records_to_markdown(
             records,
-            columns=["symbol", "lastPrice", "change", "pChange", "totalTradedVolume"],
+            columns=["symbol", "ltp", "computed_change", "perChange", "trade_quantity"],
             headers=["Symbol", "Last Price", "Change", "% Change", "Volume"],
         )
         label = {"gainers": "Top Gainers", "losers": "Top Losers", "most_active": "Most Active"}[kind]

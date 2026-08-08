@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, List
 
 from langchain_core.language_models import BaseChatModel
@@ -26,6 +27,7 @@ from agents.conversational_knowledge import (
     query_strings_respect_entity_scope,
     query_strings_respect_scope_context,
 )
+from agents._shared import format_context as _format_context, parse_json_list as _parse_json_list
 from agents.state import ResearchState
 from config import AgentConfig, ResearchDepth, get_agent_config
 from tools.base import BaseSearchTool, SearchResponse
@@ -39,20 +41,6 @@ NodeFn = Callable[[ResearchState], ResearchState]
 
 
 # Helpers
-
-def _parse_json_list(text: str) -> List[str]:
-    """Safely parse a JSON array from an LLM response."""
-    text = text.strip()
-    # Strip accidental markdown fences
-    for fence in ("```json", "```"):
-        text = text.removeprefix(fence).removesuffix("```").strip()
-    try:
-        parsed = json.loads(text)
-        if isinstance(parsed, list):
-            return [str(item).strip() for item in parsed if str(item).strip()]
-    except json.JSONDecodeError:
-        logger.warning("Could not parse JSON list from LLM output: %r", text)
-    return []
 
 
 def _sanitize_extracted_entities(entities: List[str]) -> List[str]:
@@ -86,19 +74,6 @@ def _sanitize_extracted_entities(entities: List[str]) -> List[str]:
             continue
         out.append(s)
     return out
-
-
-def _format_context(responses: List[SearchResponse]) -> str:
-    """Flatten search results into a single readable context string."""
-    chunks: List[str] = []
-    for resp in responses:
-        for r in resp.results:
-            chunks.append(
-                f"### {r.title}\nURL: {r.url}\n\n{r.content}\n"
-            )
-        if resp.answer:
-            chunks.append(f"### Direct answer from search\n{resp.answer}\n")
-    return "\n---\n".join(chunks)
 
 
 def _format_chat_history(history: List[dict]) -> str:
@@ -305,34 +280,45 @@ def make_web_search_node(
         responses: List[SearchResponse] = []
         all_follow_ups: List[str] = []
         new_unique_results_found = False
-        
+
         # Initialize processed_urls if not exists
         if not hasattr(state, 'processed_urls'):
             state.processed_urls = []
 
-        for q in state.search_queries:
+        # Queries are independent, so run them concurrently instead of one at a time —
+        # this is the dominant cost of a research round (up to 5 queries x network round-trip).
+        def _run_query(q: str) -> tuple[str, SearchResponse | None, Exception | None]:
             try:
-                resp = search_tool.search(q, search_depth=search_depth)
-                # Filter out redundant results (Information Gain check)
-                unique_results = []
-                for res in resp.results:
-                    # Simple heuristic: if URL already in context or processed, skip
-                    if res.url in state.processed_urls or any(res.url in c for c in state.context):
-                        logger.debug("[WebSearch] Skipping redundant URL: %s", res.url)
-                        continue
-                    
-                    unique_results.append(res)
-                    new_unique_results_found = True
-                
-                resp.results = unique_results
-                if unique_results or resp.answer:
-                    responses.append(resp)
-                
-                all_follow_ups.extend(resp.follow_up_questions)
-                logger.debug("[WebSearch] query=%r → %d unique results", q, len(resp.results))
-
+                return q, search_tool.search(q, search_depth=search_depth), None
             except Exception as exc:
+                return q, None, exc
+
+        max_workers = min(5, len(state.search_queries))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            query_results = list(executor.map(_run_query, state.search_queries))
+
+        for q, resp, exc in query_results:
+            if exc is not None:
                 logger.error("[WebSearch] Failed for query %r: %s", q, exc)
+                continue
+
+            # Filter out redundant results (Information Gain check)
+            unique_results = []
+            for res in resp.results:
+                # Simple heuristic: if URL already in context or processed, skip
+                if res.url in state.processed_urls or any(res.url in c for c in state.context):
+                    logger.debug("[WebSearch] Skipping redundant URL: %s", res.url)
+                    continue
+
+                unique_results.append(res)
+                new_unique_results_found = True
+
+            resp.results = unique_results
+            if unique_results or resp.answer:
+                responses.append(resp)
+
+            all_follow_ups.extend(resp.follow_up_questions)
+            logger.debug("[WebSearch] query=%r → %d unique results", q, len(resp.results))
 
         state.search_responses = responses # Only store current round's new responses for downstream nodes
         if responses:

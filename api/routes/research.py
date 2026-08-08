@@ -1,15 +1,16 @@
 """Research session management routes."""
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import List
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from database import get_db, Research
 from database.confidence_scorer import ConfidenceScorer
-from database.data_validator import DataValidator
 from api.schemas import (
     ResearchRequest,
     ResearchResponse,
@@ -156,6 +157,58 @@ async def get_research_detail(
     )
 
 
+@router.get("/research/{research_id}/pdf")
+async def get_research_pdf(
+    research_id: UUID,
+    db: Session = Depends(get_db)
+):
+    """Download a PDF report of a completed research session."""
+    research = db.query(Research).filter(Research.id == research_id).first()
+    if not research:
+        raise HTTPException(status_code=404, detail="Research not found")
+
+    if not research.final_answer:
+        raise HTTPException(
+            status_code=400,
+            detail="Research not yet complete - nothing to export"
+        )
+
+    from utils.pdf_generator import generate_pdf_from_state
+
+    # generate_pdf_from_state() only reads attributes via getattr(), so a
+    # lightweight namespace mirroring the ResearchState fields it needs works
+    # just as well as the real in-memory state object.
+    state_like = SimpleNamespace(
+        query=research.query,
+        understood_intent=research.understood_intent,
+        final_answer=research.final_answer,
+        confidence_score=research.confidence_score,
+        data_quality_score=research.data_quality_score,
+        hallucination_flagged=research.hallucination_flagged,
+        iteration=research.total_iterations,
+        validation_results={"results": [
+            {"validation_type": v.validation_type, "passed": v.passed}
+            for v in research.validations
+        ]},
+        scored_sources=[
+            {"url": s.url, "title": s.title, "overall_score": s.source_score}
+            for s in research.sources
+        ],
+    )
+
+    try:
+        pdf_bytes = generate_pdf_from_state(state_like)
+    except Exception as e:
+        logger.error(f"Error generating PDF for research {research_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to generate PDF report")
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="research_{research_id}.pdf"'},
+    )
+
+
 @router.get("/research/{research_id}/confidence", response_model=ConfidenceScoreResponse)
 async def get_confidence_score(
     research_id: UUID,
@@ -256,36 +309,25 @@ async def list_research_sessions(
     }
 
 
+# Maps the API's "depth" field to a max-search-iterations override for the graph.
+_DEPTH_TO_MAX_ITERATIONS = {"quick": 1, "standard": 3, "deep": 5}
+
+
 async def _run_research_async(research_id: UUID, query: str, depth: str):
     """
     Background task to run research.
-    
-    This would integrate with your existing LangGraph agent.
+
+    Passes ``research_id`` through so the graph's own source-scoring,
+    confidence-scoring, validation, and persistence nodes update this
+    existing row instead of creating a separate one.
     """
     try:
         from main import run_research
-        from database import SessionLocal
-        
-        # Run research using existing agent
-        result = run_research(query)
-        
-        # Update database with results
-        db = SessionLocal()
-        research = db.query(Research).filter(Research.id == research_id).first()
-        
-        if research:
-            research.final_answer = result.final_answer
-            research.follow_up_questions = result.follow_up_questions
-            research.total_iterations = result.iteration
-            research.research_complete = True
-            
-            # TODO: Run validation and scoring
-            # TODO: Store sources with scoring
-            # TODO: Calculate confidence
-            
-            db.commit()
-            logger.info(f"Research completed: {research_id}")
-        
-        db.close()
+
+        max_iterations = _DEPTH_TO_MAX_ITERATIONS.get(depth)
+        # The graph persists final_answer, confidence_score, data_quality_score,
+        # sources, and validation results directly onto this research_id.
+        run_research(query, research_id=str(research_id), max_iterations=max_iterations)
+        logger.info(f"Research completed: {research_id}")
     except Exception as e:
         logger.error(f"Error in background research: {e}", exc_info=True)

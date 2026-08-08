@@ -1,28 +1,23 @@
 """Database connection and initialization."""
 from __future__ import annotations
 
-import os
+from contextlib import contextmanager
 from typing import Generator
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 
-from config import settings
+from config import get_database_config
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+_db_config = get_database_config()
 
-# Construct PostgreSQL connection URL
+
 def get_database_url() -> str:
-    """Build PostgreSQL connection URL from environment variables."""
-    db_user = os.getenv("DB_USER", "postgres")
-    db_password = os.getenv("DB_PASSWORD", "postgres")
-    db_host = os.getenv("DB_HOST", "localhost")
-    db_port = os.getenv("DB_PORT", "5432")
-    db_name = os.getenv("DB_NAME", "deep_research_db")
-    
-    return f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+    """Build PostgreSQL connection URL from centralized config."""
+    return _db_config.url
 
 
 # Create engine with connection pooling
@@ -30,8 +25,8 @@ engine = create_engine(
     get_database_url(),
     echo=False,
     pool_pre_ping=True,  # Verify connections before using
-    pool_size=10,
-    max_overflow=20,
+    pool_size=_db_config.pool_size,
+    max_overflow=_db_config.max_overflow,
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -39,6 +34,17 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def get_db() -> Generator[Session, None, None]:
     """Dependency for FastAPI to get DB session."""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+@contextmanager
+def session_scope() -> Generator[Session, None, None]:
+    """Context manager for a DB session outside of FastAPI's dependency
+    injection (e.g. Streamlit, CLI scripts): `with session_scope() as db: ...`."""
     db = SessionLocal()
     try:
         yield db

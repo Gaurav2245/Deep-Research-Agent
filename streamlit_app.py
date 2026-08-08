@@ -11,8 +11,10 @@ from datetime import datetime
 from typing import List, Dict, Any
 import time
 import os
-import sys
 import threading
+import uuid
+
+import requests
 
 # Load environment variables early
 from dotenv import load_dotenv
@@ -20,13 +22,13 @@ from pathlib import Path
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=False)
 
 try:
-    from agents import ResearchState, build_research_graph
+    from agents import build_research_graph
     from agents.state import ResearchState as StateClass
     from config import get_agent_config
     from logging_handler import setup_logging_capture, get_streamlit_handler
     from utils.logger import get_logger
     from utils.pdf_generator import generate_pdf_from_state
-    from database import SessionLocal, Research, Source, Conversation, Message, init_db
+    from database import Research, Source, Message, init_db, session_scope
     from utils.conversation_client import ConversationClient
 except Exception as e:
     st.error(f"❌ Failed to import modules: {str(e)}")
@@ -46,6 +48,16 @@ if "_deep_research_db_init" not in st.session_state:
     except Exception as db_exc:
         logger.warning("Database init/schema patch failed: %s", db_exc)
 
+def friendly_error_message(e: Exception) -> str:
+    """Map common network exceptions to an actionable message instead of raw exception text."""
+    if isinstance(e, requests.exceptions.ConnectionError):
+        return "Can't reach the backend API. Make sure it's running and try again."
+    if isinstance(e, requests.exceptions.Timeout):
+        return "The backend API took too long to respond. Please try again."
+    logger.error(f"Unexpected error: {e}", exc_info=True)
+    return "Something went wrong. Please try again or refresh the page."
+
+
 # Database utilities
 
 def create_new_conversation(title: str = "New Chat", preserve_research_state: bool = False):
@@ -64,6 +76,7 @@ def create_new_conversation(title: str = "New Chat", preserve_research_state: bo
         
         st.session_state.current_research_id = None  # Clear research ID
         logger.info(f"Created new conversation: {convo['id']}")
+        get_all_conversations.clear()
         return convo
     else:
         logger.error("Failed to create conversation - API returned None")
@@ -106,6 +119,7 @@ def load_conversation(conversation_id: str):
     return None
 
 
+@st.cache_data(ttl=15, show_spinner="Loading conversations...")
 def get_all_conversations():
     """Fetch all conversations for the sidebar."""
     logger.info("Fetching all conversations...")
@@ -115,7 +129,7 @@ def get_all_conversations():
         return result
     except Exception as e:
         logger.error(f"Failed to get conversations: {e}")
-        st.error(f"Could not fetch chat history: {e}")
+        st.error(f"Could not fetch chat history: {friendly_error_message(e)}")
         return []
 
 
@@ -128,7 +142,7 @@ def save_message_to_conversation(role: str, content: str, research_id: str = Non
     try:
         # Create message object for display immediately
         msg_display = {
-            "id": str(hash(content))[:8],  # Temporary ID until API responds
+            "id": str(uuid.uuid4()),  # Temporary ID until API responds
             "role": role,
             "content": content,
             "created_at": datetime.now().isoformat(),
@@ -153,6 +167,7 @@ def save_message_to_conversation(role: str, content: str, research_id: str = Non
             msg_display["id"] = str(message.get("id", msg_display["id"]))
             msg_display["created_at"] = message.get("created_at", msg_display["created_at"])
             logger.info(f"Saved {role} message to conversation {st.session_state.current_conversation_id}")
+            get_all_conversations.clear()  # message count/recency changed
             return message
         else:
             logger.error(f"Failed to save {role} message - API returned None, but kept in display")
@@ -169,6 +184,7 @@ def delete_conversation(conversation_id: str):
         if st.session_state.current_conversation_id == conversation_id:
             # Clear current conversation
             clear_session()
+        get_all_conversations.clear()
         return True
     return False
 
@@ -180,77 +196,75 @@ def rename_conversation(conversation_id: str, new_title: str):
         if st.session_state.current_conversation_id == conversation_id:
             st.session_state.current_conversation_title = new_title
         logger.info(f"Renamed conversation to: {new_title}")
+        get_all_conversations.clear()
         return result
     return None
 
+@st.cache_data(ttl=15, show_spinner="Loading reports...")
 def get_recent_research(limit: int = 10):
     """Fetch recent research sessions from the database."""
-    db = SessionLocal()
     try:
-        return db.query(Research).order_by(Research.created_at.desc()).limit(limit).all()
+        with session_scope() as db:
+            return db.query(Research).order_by(Research.created_at.desc()).limit(limit).all()
     except Exception as e:
         logger.error(f"Error fetching research: {e}")
         return []
-    finally:
-        db.close()
 
 
 def get_research_state_by_id(research_id: str):
     """Reconstruct a ResearchState object from the database for a given ID."""
-    db = SessionLocal()
     try:
-        res = db.query(Research).filter(Research.id == research_id).first()
-        if not res:
-            return None
-        
-        # Reconstruct state
-        state = StateClass(
-            query=res.query,
-            search_queries=[],
-            final_answer=res.final_answer,
-            chat_history=res.chat_history or [],
-            confidence_score=res.confidence_score,
-            data_quality_score=res.data_quality_score,
-            hallucination_flagged=res.hallucination_flagged,
-            research_id=str(res.id),
-            processed_urls=[],
-            has_new_data=True,
-            extracted_entities=[],
-            conversation_summary=None,
-            understood_intent=getattr(res, 'understood_intent', res.query),
-            query_reasoning=getattr(res, 'query_reasoning', ""),
-            active_topic=getattr(res, 'active_topic', ""),
-            is_follow_up=getattr(res, 'is_follow_up', False),
-            entities_resolved=getattr(res, 'entities_resolved', {}),
-            conversational_knowledge=getattr(res, 'conversational_knowledge', {}) or {},
-            scoped_entities=[],
-            scope_context="",
-        )
-        
-        # Load sources
-        sources = db.query(Source).filter(Source.research_id == res.id).all()
-        scored_sources = []
-        for s in sources:
-            scored_sources.append({
-                "title": s.title,
-                "url": s.url,
-                "content": s.content,
-                "overall_score": s.source_score,
-                "relevance": s.relevance_score,
-                "authority": s.authority_score,
-                "freshness": s.recency_score,
-                "domain_authority": s.authority_score,
-                "content_freshness": s.recency_score
-            })
-            state.processed_urls.append(s.url)
-            
-        state.scored_sources = scored_sources
-        return state
+        with session_scope() as db:
+            res = db.query(Research).filter(Research.id == research_id).first()
+            if not res:
+                return None
+
+            # Reconstruct state
+            state = StateClass(
+                query=res.query,
+                search_queries=[],
+                final_answer=res.final_answer,
+                chat_history=res.chat_history or [],
+                confidence_score=res.confidence_score,
+                data_quality_score=res.data_quality_score,
+                hallucination_flagged=res.hallucination_flagged,
+                research_id=str(res.id),
+                processed_urls=[],
+                has_new_data=True,
+                extracted_entities=[],
+                conversation_summary=None,
+                understood_intent=getattr(res, 'understood_intent', res.query),
+                query_reasoning=getattr(res, 'query_reasoning', ""),
+                active_topic=getattr(res, 'active_topic', ""),
+                is_follow_up=getattr(res, 'is_follow_up', False),
+                entities_resolved=getattr(res, 'entities_resolved', {}),
+                conversational_knowledge=getattr(res, 'conversational_knowledge', {}) or {},
+                scoped_entities=[],
+                scope_context="",
+            )
+
+            # Load sources
+            sources = db.query(Source).filter(Source.research_id == res.id).all()
+            scored_sources = []
+            for s in sources:
+                scored_sources.append({
+                    "title": s.title,
+                    "url": s.url,
+                    "content": s.content,
+                    "overall_score": s.source_score,
+                    "relevance": s.relevance_score,
+                    "authority": s.authority_score,
+                    "freshness": s.recency_score,
+                    "domain_authority": s.authority_score,
+                    "content_freshness": s.recency_score
+                })
+                state.processed_urls.append(s.url)
+
+            state.scored_sources = scored_sources
+            return state
     except Exception as e:
         logger.error(f"Error getting research state {research_id}: {e}")
         return None
-    finally:
-        db.close()
 
 @st.cache_data(show_spinner=False)
 def get_pdf_report_bytes(research_id: str):
@@ -268,20 +282,18 @@ def load_research_to_state(research_id: str, load_associated_convo: bool = True)
     """Load a specific research session into the current application state."""
     # Find and load the conversation this research belongs to if requested
     if load_associated_convo:
-        db = SessionLocal()
         try:
-            message = db.query(Message).filter(Message.research_id == research_id).first()
-            if message:
-                logger.info(f"Found associated conversation {message.conversation_id} for research {research_id}")
-                convo = conversation_client.get_conversation(str(message.conversation_id))
-                if convo:
-                    st.session_state.current_conversation_id = str(message.conversation_id)
-                    st.session_state.current_conversation_title = convo.get("title", "Chat")
-                    st.session_state.conversation_messages = convo.get("messages", [])
+            with session_scope() as db:
+                message = db.query(Message).filter(Message.research_id == research_id).first()
+                if message:
+                    logger.info(f"Found associated conversation {message.conversation_id} for research {research_id}")
+                    convo = conversation_client.get_conversation(str(message.conversation_id))
+                    if convo:
+                        st.session_state.current_conversation_id = str(message.conversation_id)
+                        st.session_state.current_conversation_title = convo.get("title", "Chat")
+                        st.session_state.conversation_messages = convo.get("messages", [])
         except Exception as e:
             logger.error(f"Error finding associated conversation: {e}")
-        finally:
-            db.close()
             
     state = get_research_state_by_id(research_id)
     if not state:
@@ -298,7 +310,7 @@ def load_research_to_state(research_id: str, load_associated_convo: bool = True)
 
 st.set_page_config(
     page_title="Deep Research Agent",
-    page_icon="search",
+    page_icon="🔍",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -322,6 +334,7 @@ def init_session_state():
         "current_conversation_id": None,
         "current_conversation_title": "New Chat",
         "conversation_messages": [],
+        "pending_delete_id": None,
     }
     
     for key, value in defaults.items():
@@ -588,7 +601,8 @@ def run_research(query: str, is_follow_up: bool = False):
         return final_state
     
     except Exception as e:
-        st.error(f"Error: {str(e)}")
+        logger.error(f"Research pipeline error: {e}", exc_info=True)
+        st.error(friendly_error_message(e))
         st.session_state.is_researching = False
         return None
 
@@ -659,38 +673,46 @@ def display_research_results(state: StateClass):
         # PDF Export
         with col1:
             try:
-                pdf_bytes = generate_pdf_from_state(state)
-                st.download_button(
-                    label="📄 Download PDF",
-                    data=pdf_bytes,
-                    file_name=f"research_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-                    mime="application/pdf",
-                    use_container_width=True
-                )
+                # Reuse the cached generator (keyed by research_id) whenever possible
+                # so re-rendering this page doesn't regenerate the PDF from scratch
+                # every rerun; fall back to direct generation before an ID exists.
+                research_id = getattr(state, "research_id", None)
+                pdf_bytes = get_pdf_report_bytes(str(research_id)) if research_id else generate_pdf_from_state(state)
+                if pdf_bytes:
+                    st.download_button(
+                        label="📄 Download PDF",
+                        data=pdf_bytes,
+                        file_name=f"research_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                        mime="application/pdf",
+                        use_container_width=True
+                    )
+                else:
+                    st.error("Could not generate PDF")
             except Exception as e:
                 logger.error(f"Error generating PDF: {e}", exc_info=True)
                 st.error("Could not generate PDF")
-        
+
         # Markdown Export (Placeholder for future)
         with col2:
-            st.button("📝 Export Markdown", disabled=True, use_container_width=True)
-        
+            st.button("📝 Export Markdown", disabled=True, use_container_width=True, help="Coming soon")
+
         # JSON Export (Placeholder for future)
         with col3:
-            st.button("📊 Export JSON", disabled=True, use_container_width=True)
+            st.button("📊 Export JSON", disabled=True, use_container_width=True, help="Coming soon")
 
-        # 6. Debug Info (Expander)
-        with st.expander("Technical State (Debug)", expanded=False):
-            st.json({
-                "iteration": getattr(state, 'iteration', 0),
-                "entities": getattr(state, 'extracted_entities', []),
-                "queries": getattr(state, 'search_queries', []),
-                "has_new_data": getattr(state, 'has_new_data', False),
-                "info_gain": getattr(state, 'information_gain', 0.0)
-            })
+        # 6. Debug Info (Expander) — internal state, not meant for end users
+        if os.getenv("SHOW_DEBUG_PANEL", "false").lower() == "true":
+            with st.expander("Technical State (Debug)", expanded=False):
+                st.json({
+                    "iteration": getattr(state, 'iteration', 0),
+                    "entities": getattr(state, 'extracted_entities', []),
+                    "queries": getattr(state, 'search_queries', []),
+                    "has_new_data": getattr(state, 'has_new_data', False),
+                    "info_gain": getattr(state, 'information_gain', 0.0)
+                })
     except Exception as e:
         logger.error(f"Error in display_research_results: {e}", exc_info=True)
-        st.error(f"Error displaying research results: {str(e)}")
+        st.error("Couldn't display the full research report. " + friendly_error_message(e))
         st.caption("(Check logs for more details)")
 
 
@@ -774,33 +796,53 @@ def main():
                 clear_session()
                 st.rerun()
         with col3:
-            if st.button("🔄", help="Refresh API Connection"):
+            if st.button("🔄", help="Refresh"):
+                get_all_conversations.clear()
+                get_recent_research.clear()
                 st.rerun()
-        
+
         st.divider()
-        
+
         # Conversations Section
         st.markdown("### 💬 Conversations")
         try:
             conversations = get_all_conversations()
             if conversations:
                 for convo in conversations:
+                    convo_id = str(convo["id"])
                     # Highlight active conversation
-                    is_active = str(convo["id"]) == st.session_state.current_conversation_id
+                    is_active = convo_id == st.session_state.current_conversation_id
                     title = convo.get("title", "Untitled Chat")
                     if len(title) > 30:
                         title = title[:27] + "..."
-                    
+
                     # Use columns for conversation entry and delete button
                     c1, c2 = st.columns([5, 1])
                     with c1:
                         btn_label = f"▶ {title}" if is_active else title
-                        if st.button(btn_label, key=f"convo_{convo['id']}", use_container_width=True):
-                            load_conversation(str(convo["id"]))
+                        if st.button(btn_label, key=f"convo_{convo_id}", use_container_width=True):
+                            load_conversation(convo_id)
                             st.rerun()
                     with c2:
-                        if st.button("🗑️", key=f"del_{convo['id']}", help="Delete chat"):
-                            if delete_conversation(str(convo["id"])):
+                        if st.button("🗑️", key=f"del_{convo_id}", help="Delete chat"):
+                            st.session_state.pending_delete_id = convo_id
+                            st.rerun()
+
+                    # Arm-then-confirm delete: first click above only arms it, so a
+                    # single misclick can never destroy a conversation.
+                    if st.session_state.pending_delete_id == convo_id:
+                        st.warning(f"Delete \"{title}\"? This can't be undone.")
+                        confirm_col, cancel_col = st.columns(2)
+                        with confirm_col:
+                            if st.button("Confirm delete", key=f"confirm_del_{convo_id}", type="primary", use_container_width=True):
+                                st.session_state.pending_delete_id = None
+                                if delete_conversation(convo_id):
+                                    st.rerun()
+                                else:
+                                    st.error("Failed to delete. Please try again.")
+                        with cancel_col:
+                            if st.button("Cancel", key=f"cancel_del_{convo_id}", use_container_width=True):
+                                st.session_state.pending_delete_id = None
                                 st.rerun()
             else:
                 st.caption("No conversations found.")
@@ -808,10 +850,10 @@ def main():
                     st.error("⚠️ API is unreachable")
                     st.info(f"Target: {conversation_client.base_url}")
         except Exception as e:
-            st.error(f"API Error: {e}")
+            st.error(friendly_error_message(e))
 
         st.divider()
-        
+
         # Research Reports History (as an expander)
         with st.expander("📊 Recent Reports", expanded=False):
             recent = get_recent_research(15)
@@ -852,7 +894,7 @@ def main():
                 display_research_results(st.session_state.research_state)
             except Exception as e:
                 logger.error(f"Error displaying research results: {e}", exc_info=True)
-                st.error(f"Error displaying research results: {str(e)}")
+                st.error("Couldn't display the full research report. " + friendly_error_message(e))
                 st.info("Try refreshing the page or selecting the conversation again.")
             
             # After a run, we should have a research_id

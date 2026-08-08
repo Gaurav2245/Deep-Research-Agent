@@ -15,6 +15,8 @@ logger = get_logger(__name__)
 
 router = APIRouter()
 
+_validator = DataValidator()
+
 
 @router.get("/research/{research_id}/quality", response_model=DataQualityResponse)
 async def get_data_quality(
@@ -47,7 +49,7 @@ async def get_data_quality(
     ]
     
     # Run all validations
-    validation_results = DataValidator.validate_all(
+    validation_results = _validator.validate_all(
         final_answer=research.final_answer,
         sources=sources,
         query=research.query,
@@ -116,7 +118,7 @@ async def validate_completeness(
         for s in research.sources
     ]
     
-    result = DataValidator.validate_completeness(
+    result = _validator.validate_completeness(
         final_answer=research.final_answer,
         sources=sources,
         query=research.query,
@@ -143,7 +145,7 @@ async def validate_consistency(
         for s in research.sources
     ]
     
-    result = DataValidator.validate_consistency(
+    result = _validator.validate_consistency(
         sources=sources,
         final_answer=research.final_answer,
     )
@@ -169,7 +171,7 @@ async def detect_hallucination(
         for s in research.sources
     ]
     
-    result = DataValidator.detect_hallucination_markers(
+    result = _validator.detect_hallucination_markers(
         final_answer=research.final_answer,
         sources=sources,
     )
@@ -195,7 +197,7 @@ async def validate_factual_claims(
         for s in research.sources
     ]
     
-    result = DataValidator.validate_factual_claims(
+    result = _validator.validate_factual_claims(
         final_answer=research.final_answer,
         sources=sources,
     )

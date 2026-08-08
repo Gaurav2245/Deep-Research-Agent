@@ -11,6 +11,7 @@ Or import and use programmatically:
     result = run_research("Your question here")
     print(result.final_answer)
 """
+import dataclasses
 import os
 import sys
 
@@ -34,15 +35,30 @@ def setup_langsmith():
         os.environ["LANGCHAIN_PROJECT"] = cfg.langsmith_project
 
 
-def run_research(query: str) -> StateClass:
+def run_research(
+    query: str,
+    research_id: str | None = None,
+    max_iterations: int | None = None,
+) -> StateClass:
     """
     Run the full research pipeline for a given query.
+
+    Parameters
+    ----------
+    research_id:
+        If set, the database persistence node updates this existing
+        ``Research`` row instead of creating a new one.
+    max_iterations:
+        Overrides ``AgentConfig.max_search_iterations`` for this run
+        (used to implement "quick"/"standard"/"deep" research depth).
     """
     cfg = get_agent_config()
+    if max_iterations is not None:
+        cfg = dataclasses.replace(cfg, max_search_iterations=max_iterations)
     logger.setLevel(cfg.log_level)
-    
+
     setup_langsmith()
-    
+
     # Initialize DB (create tables if they don't exist)
     try:
         init_db()
@@ -55,7 +71,7 @@ def run_research(query: str) -> StateClass:
     logger.info("LLM         : %s", cfg.llm_provider.value)
 
     graph = build_research_graph(cfg)
-    initial_state = StateClass(query=query)
+    initial_state = StateClass(query=query, research_id=research_id)
 
     final_state = graph.invoke(initial_state)
     

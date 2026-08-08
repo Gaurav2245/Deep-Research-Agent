@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from typing import List
 
 import numpy as np
@@ -26,6 +27,7 @@ from config import get_agent_config
 
 # ── Global Model Singleton ────────────────────────────────────────────────────
 _shared_model: SentenceTransformer | None = None
+_shared_model_lock = threading.Lock()
 
 def get_shared_model(model_name: str = "all-MiniLM-L6-v2") -> SentenceTransformer | None:
     """Lazy-load the SentenceTransformer model once and share it."""
@@ -33,8 +35,16 @@ def get_shared_model(model_name: str = "all-MiniLM-L6-v2") -> SentenceTransforme
     if not HAS_SENTENCE_TRANSFORMERS:
         logger.error("❌ sentence-transformers library is not installed. Embedding service cannot start.")
         return None
-        
-    if _shared_model is None:
+
+    # Fast path: avoid taking the lock on every call once the model is loaded.
+    if _shared_model is not None:
+        return _shared_model
+
+    with _shared_model_lock:
+        # Re-check: another thread may have loaded it while we waited for the lock.
+        if _shared_model is not None:
+            return _shared_model
+
         max_retries = 2
         for attempt in range(max_retries + 1):
             try:

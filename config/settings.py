@@ -15,6 +15,17 @@ from dotenv import load_dotenv
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env", override=False)
 
 
+def _require_env(name: str) -> str:
+    """Read a required env var, raising a clear, actionable error if it's missing."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"Missing required environment variable '{name}'. "
+            f"Set it in your .env file (see .env.example) before starting the app."
+        )
+    return value
+
+
 # ── Enums ────────────────────────────────────────────────────────────────────
 
 class SearchProvider(str, Enum):
@@ -26,7 +37,6 @@ class SearchProvider(str, Enum):
 
 class LLMProvider(str, Enum):
     AZURE_OPENAI = "azure_openai"
-    OPENAI = "openai"
 
 
 class ResearchDepth(str, Enum):
@@ -38,8 +48,8 @@ class ResearchDepth(str, Enum):
 
 @dataclass(frozen=True)
 class AzureOpenAIConfig:
-    api_key: str = field(default_factory=lambda: os.environ["AZURE_OPENAI_API_KEY"])
-    endpoint: str = field(default_factory=lambda: os.environ["AZURE_OPENAI_ENDPOINT"])
+    api_key: str = field(default_factory=lambda: _require_env("AZURE_OPENAI_API_KEY"))
+    endpoint: str = field(default_factory=lambda: _require_env("AZURE_OPENAI_ENDPOINT"))
     deployment_name: str = field(
         default_factory=lambda: os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o")
     )
@@ -53,7 +63,7 @@ class AzureOpenAIConfig:
 
 @dataclass(frozen=True)
 class TavilyConfig:
-    api_key: str = field(default_factory=lambda: os.environ["TAVILY_API_KEY"])
+    api_key: str = field(default_factory=lambda: _require_env("TAVILY_API_KEY"))
     max_results: int = field(
         default_factory=lambda: int(os.getenv("MAX_RESULTS_PER_SEARCH", "5"))
     )
@@ -77,6 +87,21 @@ class ScraperConfig:
     max_scrape_urls: int = field(
         default_factory=lambda: int(os.getenv("SCRAPER_MAX_URLS", "3"))
     )
+
+
+@dataclass(frozen=True)
+class DatabaseConfig:
+    user: str = field(default_factory=lambda: os.getenv("DB_USER", "postgres"))
+    password: str = field(default_factory=lambda: os.getenv("DB_PASSWORD", "postgres"))
+    host: str = field(default_factory=lambda: os.getenv("DB_HOST", "localhost"))
+    port: str = field(default_factory=lambda: os.getenv("DB_PORT", "5432"))
+    name: str = field(default_factory=lambda: os.getenv("DB_NAME", "deep_research_db"))
+    pool_size: int = field(default_factory=lambda: int(os.getenv("DB_POOL_SIZE", "10")))
+    max_overflow: int = field(default_factory=lambda: int(os.getenv("DB_MAX_OVERFLOW", "20")))
+
+    @property
+    def url(self) -> str:
+        return f"postgresql://{self.user}:{self.password}@{self.host}:{self.port}/{self.name}"
 
 
 @dataclass(frozen=True)
@@ -122,6 +147,11 @@ class AgentConfig:
             "ENABLE_SCRAPER", "true"
         ).lower() == "true"
     )
+    enable_nse_auto_routing: bool = field(
+        default_factory=lambda: os.getenv(
+            "ENABLE_NSE_AUTO_ROUTING", "true"
+        ).lower() == "true"
+    )
     # LangSmith observability
     langsmith_tracing: bool = field(
         default_factory=lambda: os.getenv("LANGCHAIN_TRACING_V2", "false").lower() == "true"
@@ -161,3 +191,7 @@ def get_scraper_config() -> ScraperConfig:
 
 def get_nse_config() -> NSEConfig:
     return NSEConfig()
+
+
+def get_database_config() -> DatabaseConfig:
+    return DatabaseConfig()

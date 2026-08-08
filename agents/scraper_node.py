@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import re
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, List
 from urllib.parse import urlparse
 
 from agents.state import ResearchState
+from tools.base import SearchResponse
 from tools.playwright_scraper import PlaywrightScraperTool, ScraperConfig
 from utils.logger import get_logger
 from utils.table_extractor import html_tables_to_markdown
@@ -100,31 +102,42 @@ def make_scraper_node(
 
         logger.info("[ScraperNode] Deep-scraping %d new URL(s): %s", len(urls_to_scrape), urls_to_scrape)
 
-        enriched_chunks: List[str] = []
-        for url in urls_to_scrape:
+        # Each fetch_url() call launches its own independent browser instance, so these
+        # are safe to run concurrently — and scraping is the slowest step in the pipeline.
+        def _scrape(url: str) -> tuple[str, SearchResponse | None, Exception | None]:
             try:
-                response = _scraper.fetch_url(url, extract_tables=True, scroll=True)
-                # Mark as processed immediately so we don't try again even if it fails partially
-                if url not in state.processed_urls:
-                    state.processed_urls.append(url)
-
-                for r in response.results:
-                    if r.content.strip():
-                        enriched_chunks.append(
-                            f"### Deep-scraped: {r.title}\nURL: {url}\n\n{r.content}"
-                        )
-                    else:
-                        # Content was empty - likely a scrape failure or paywall
-                        domain = urlparse(url).netloc.lower().replace("www.", "")
-                        if domain not in state.failed_domains:
-                            state.failed_domains.append(domain)
-                            logger.info("[ScraperNode] Tracking failed domain: %s", domain)
+                return url, _scraper.fetch_url(url, extract_tables=True, scroll=True), None
             except Exception as exc:
+                return url, None, exc
+
+        with ThreadPoolExecutor(max_workers=len(urls_to_scrape)) as executor:
+            scrape_results = list(executor.map(_scrape, urls_to_scrape))
+
+        enriched_chunks: List[str] = []
+        for url, response, exc in scrape_results:
+            if exc is not None:
                 logger.warning("[ScraperNode] Failed to scrape %s: %s", url, exc)
                 domain = urlparse(url).netloc.lower().replace("www.", "")
                 if domain not in state.failed_domains:
                     state.failed_domains.append(domain)
                     logger.info("[ScraperNode] Tracking failed domain: %s", domain)
+                continue
+
+            # Mark as processed immediately so we don't try again even if it fails partially
+            if url not in state.processed_urls:
+                state.processed_urls.append(url)
+
+            for r in response.results:
+                if r.content.strip():
+                    enriched_chunks.append(
+                        f"### Deep-scraped: {r.title}\nURL: {url}\n\n{r.content}"
+                    )
+                else:
+                    # Content was empty - likely a scrape failure or paywall
+                    domain = urlparse(url).netloc.lower().replace("www.", "")
+                    if domain not in state.failed_domains:
+                        state.failed_domains.append(domain)
+                        logger.info("[ScraperNode] Tracking failed domain: %s", domain)
 
         if enriched_chunks:
             state.context.append(

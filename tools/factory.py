@@ -36,17 +36,25 @@ def create_search_tool(config: AgentConfig | None = None) -> BaseSearchTool:
         from tools.tavily_tool import TavilySearchTool
         from tools.fallback_tool import FallbackSearchTool
 
-        return FallbackSearchTool(
-        primary=TavilySearchTool()
-    )
+        tool: BaseSearchTool = FallbackSearchTool(primary=TavilySearchTool())
+        return _maybe_wrap_with_nse_routing(tool, cfg)
 
     if provider == SearchProvider.DUCKDUCKGO:
         from tools.duckduckgo_tool import DuckDuckGoSearchTool
-        return DuckDuckGoSearchTool()
+        return _maybe_wrap_with_nse_routing(DuckDuckGoSearchTool(), cfg)
 
     if provider == SearchProvider.NSE:
-        from tools.nse_tool import NSETool
-        return NSETool()
+        from config import get_nse_config
+        from tools.nse_tool import NSEConfig, NSETool
+
+        nse_cfg = get_nse_config()
+        return NSETool(
+            NSEConfig(
+                timeout=nse_cfg.timeout,
+                max_retries=nse_cfg.max_retries,
+                headless=nse_cfg.headless,
+            )
+        )
 
     if provider == SearchProvider.PLAYWRIGHT:
         from tools.playwright_scraper import PlaywrightScraperTool
@@ -56,3 +64,15 @@ def create_search_tool(config: AgentConfig | None = None) -> BaseSearchTool:
         f"Unsupported SEARCH_PROVIDER '{provider.value}'. "
         f"Valid choices: {[p.value for p in SearchProvider]}"
     )
+
+
+def _maybe_wrap_with_nse_routing(tool: BaseSearchTool, cfg: AgentConfig) -> BaseSearchTool:
+    """
+    Wrap a web-search tool so Indian stock-market queries (nifty/sensex/gainers/
+    losers) are routed to NSETool's live data instead of generic web search.
+    Controlled by ENABLE_NSE_AUTO_ROUTING (default: on).
+    """
+    if not cfg.enable_nse_auto_routing:
+        return tool
+    from tools.nse_router_tool import AutoRoutingSearchTool
+    return AutoRoutingSearchTool(default_tool=tool)

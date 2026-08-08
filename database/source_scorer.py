@@ -24,7 +24,10 @@ class SourceScorer:
         "github.com", "stackoverflow.com", "developer.mozilla.org",
         # Sports Authority
         "espncricinfo.com", "espn.com", "foxsports.com", "goal.com", "soccerway.com",
-        "atptour.com", "wtatennis.com", "nba.com", "fifa.com", "olympics.com"
+        "atptour.com", "wtatennis.com", "nba.com", "fifa.com", "olympics.com",
+        # Indian financial data platforms (regulated brokers / exchange-licensed data)
+        "moneycontrol.com", "economictimes.indiatimes.com", "livemint.com",
+        "screener.in", "zerodha.com", "groww.in",
     }
 
     @staticmethod
@@ -50,7 +53,9 @@ class SourceScorer:
 
     # MEDIUM AUTHORITY: 0.7
     MEDIUM_AUTHORITY_DOMAINS = {
-        "medium.com", "substack.com", "forbes.com", "businessinsider.com", "cnbc.com"
+        "medium.com", "substack.com", "forbes.com", "businessinsider.com", "cnbc.com",
+        # Indian financial data aggregators (broker/research platforms, not primary exchanges)
+        "tickertape.in", "dhan.co", "equitymaster.com", "investing.com",
     }
 
     # LOW AUTHORITY: 0.3
@@ -105,6 +110,50 @@ class SourceScorer:
         return score
 
     @staticmethod
+    def extract_date_from_content(content: str) -> Optional[str]:
+        """
+        Best-effort extraction of a publication/update date from page text,
+        for use when a source has no reliable metadata date.
+
+        Checks, in order:
+        1. Relative/live timestamps ("2 hours ago", "as of 3:30 PM", "live market
+           data") — common on real-time dashboards that never print a calendar
+           date. Resolved to today's date.
+        2. A "published/updated/posted/dated/on <date>" pattern (day-first
+           "7 Aug 2025", ISO "2026-05-15", or month-first "Aug 7, 2025").
+        3. A bare contextual year, as a last resort.
+        """
+        snippet = (content or "")[:2000]
+
+        if re.search(r"\b\d+\s*(?:minutes?|mins?|hours?|hrs?)\s+ago\b", snippet, re.IGNORECASE):
+            return datetime.utcnow().strftime("%Y-%m-%d")
+
+        if re.search(r"\bas\s+of\s+\d{1,2}[:.]\d{2}\s*(?:am|pm)?\b", snippet, re.IGNORECASE):
+            return datetime.utcnow().strftime("%Y-%m-%d")
+
+        if re.search(r"\blive\s+(?:market|price|prices|data|quote|quotes)\b", snippet, re.IGNORECASE):
+            return datetime.utcnow().strftime("%Y-%m-%d")
+
+        full_date_match = re.search(
+            r"(?:published|updated|posted|on|dated)\s*(?::|on)?\s*"
+            r"(\b\d{1,2}(?:st|nd|rd|th)?[-/\s]+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[,/\s-]+\d{4}\b|"
+            r"\b\d{4}-\d{1,2}-\d{1,2}\b|"
+            r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}\b)",
+            snippet, re.IGNORECASE
+        )
+        if full_date_match:
+            return full_date_match.group(1)
+
+        year_match = re.search(
+            r"(?:published|updated|date|posted|on|modified)\s*(?::|on)?\s*\b(202[0-9])\b",
+            snippet, re.IGNORECASE
+        )
+        if year_match:
+            return year_match.group(1)
+
+        return None
+
+    @staticmethod
     def score_content_freshness(content_date: str | None = None) -> float:
         """
         Score content freshness based on publication date using exponential decay.
@@ -116,7 +165,9 @@ class SourceScorer:
             date_str = content_date.strip()
             # Clean up common web date artifacts
             date_str = re.sub(r'^(?:published|updated|posted|on|dated)\s*(?::|on)?\s*', '', date_str, flags=re.IGNORECASE)
-            
+            # Strip ordinal suffixes (e.g. "7th August 2025" -> "7 August 2025") so strptime can parse them
+            date_str = re.sub(r'\b(\d{1,2})(?:st|nd|rd|th)\b', r'\1', date_str, flags=re.IGNORECASE)
+
             pub_date = None
             # Try a wide range of formats
             formats = [

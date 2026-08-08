@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import List, Optional, Dict, Any
 from uuid import UUID
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
 
 class SourceInfo(BaseModel):
@@ -149,8 +149,7 @@ class MessageResponse(BaseModel):
     context_data: Optional[Dict[str, Any]] = None
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ConversationCreate(BaseModel):
@@ -169,8 +168,7 @@ class ConversationResponse(BaseModel):
     message_count: int
     research_count: int
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ConversationDetailResponse(BaseModel):
@@ -184,69 +182,19 @@ class ConversationDetailResponse(BaseModel):
     research_count: int
     messages: List[MessageResponse]
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ConversationQueryRequest(BaseModel):
-    """Request to query a conversation with memory-aware retrieval."""
+    """Request to query a conversation."""
     query: str = Field(min_length=1, max_length=10000)
     conversation_id: UUID
-    perform_research: Optional[bool] = None  # If None, auto-decide based on memory coverage
-
-
-class MemoryRetrievalInfo(BaseModel):
-    """Information about memory retrieval."""
-    should_use_memory: bool
-    memory_coverage: float = Field(ge=0, le=1)
-    retrieved_entities: List[str] = []
-    num_facts: int = 0
-
-
-class ResolutionInfo(BaseModel):
-    """Information about follow-up reference resolution."""
-    is_follow_up: bool
-    resolved_references: Dict[str, str] = {}
-    primary_entity: Optional[str] = None
-    active_entities: List[str] = []
-    resolution_confidence: float = Field(ge=0, le=1)
-
-
-class ExtractedFact(BaseModel):
-    """A single extracted fact from conversation."""
-    entity: str
-    attribute: str
-    value: str
-    confidence: float = Field(ge=0, le=1)
 
 
 class ConversationQueryResponse(BaseModel):
-    """Response to a conversation query with memory and resolution info."""
+    """Response to a conversation query."""
     assistant_message_id: UUID
     content: str
-    
-    # Memory and resolution info
-    memory_info: MemoryRetrievalInfo
-    resolution_info: ResolutionInfo
-    
-    # Response metadata
-    facts_extracted: List[ExtractedFact] = []
-    research_performed: bool = False
     elapsed_ms: float
-    
-    class Config:
-        from_attributes = True
 
-
-class ConversationMemoryStats(BaseModel):
-    """Memory statistics for a conversation."""
-    conversation_id: UUID
-    total_turns: int
-    active_entities: List[str] = []
-    unique_entities: int = 0
-    facts_extracted: int = 0
-    top_topics: List[str] = []
-    memory_efficiency: float = Field(ge=0, le=1)
-    
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)

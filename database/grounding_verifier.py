@@ -93,18 +93,26 @@ class GroundingVerifier:
         
         # Combine source content
         source_content = self._prepare_source_content(sources)
-        
+
+        # Precompute source-sentence embeddings once for the whole answer —
+        # semantic matching used to re-embed every source sentence per claim,
+        # which is the dominant cost of grounding verification.
+        source_sentence_index = (
+            self._build_source_sentence_index(sources) if self.embedding_service else []
+        )
+
         # Verify each claim
         results = []
         for sentence in sentences:
             if len(sentence.strip()) < 10:  # Skip very short sentences
                 continue
-                
+
             result = self._verify_claim(
                 claim=sentence,
                 source_content=source_content,
                 sources=sources,
-                query=query
+                query=query,
+                source_sentence_index=source_sentence_index,
             )
             results.append(result)
         
@@ -123,7 +131,7 @@ class GroundingVerifier:
         
         # Generate recommendation
         ungrounded = [r.claim for r in results if not r.is_grounded]
-        if hallucination_score := 1.0 - grounding_score > 0.2:
+        if (hallucination_score := 1.0 - grounding_score) > 0.2:
             recommendation = f"❌ HIGH HALLUCINATION RISK ({hallucinated}/{len(results)} claims ungrounded). Regenerate with stricter prompt."
         elif hallucination_risk == "medium":
             recommendation = f"⚠️  MEDIUM RISK ({hallucinated} claims need verification). Review and cite sources explicitly."
@@ -153,7 +161,8 @@ class GroundingVerifier:
         claim: str,
         source_content: str,
         sources: List[Dict],
-        query: str
+        query: str,
+        source_sentence_index: List[Tuple[str, str, List[float]]] = (),
     ) -> VerificationResult:
         """Verify single claim against sources."""
         
@@ -189,9 +198,9 @@ class GroundingVerifier:
             )
         
         # Try semantic match if embedding service available
-        if self.embedding_service:
+        if self.embedding_service and source_sentence_index:
             semantic_match_score, semantic_sources, evidence = (
-                self._semantic_match_search(claim, sources)
+                self._semantic_match_search(claim, source_sentence_index)
             )
             if semantic_match_score > 0.6:
                 confidence = semantic_match_score
@@ -322,55 +331,70 @@ class GroundingVerifier:
         score = min(1.0, match_count / max(1, len(entities)))
         return score, matching_sources
 
+    def _build_source_sentence_index(
+        self,
+        sources: List[Dict]
+    ) -> List[Tuple[str, str, List[float]]]:
+        """
+        Precompute (source_ref, sentence, embedding) for every qualifying source
+        sentence, once per `verify_answer()` call.
+
+        Semantic matching previously re-embedded every source sentence for every
+        claim being verified — this index turns that into a single batched
+        embedding call reused across all claims in the answer.
+        """
+        candidates: List[Tuple[str, str]] = []
+        for source in sources:
+            content = source.get("content") or source.get("text") or ""
+            if not content:
+                continue
+            source_ref = source.get("url") or source.get("title") or "Unknown"
+            for sentence in self._extract_sentences(content):
+                if len(sentence.split()) < 3:  # Skip very short
+                    continue
+                candidates.append((source_ref, sentence))
+
+        if not candidates:
+            return []
+
+        try:
+            embeddings = self.embedding_service.embed_texts([s for _, s in candidates])
+        except Exception as e:
+            logger.warning(f"Failed to batch-embed source sentences: {e}")
+            return []
+
+        return [(ref, sentence, emb) for (ref, sentence), emb in zip(candidates, embeddings)]
+
     def _semantic_match_search(
         self,
         claim: str,
-        sources: List[Dict]
+        source_sentence_index: List[Tuple[str, str, List[float]]]
     ) -> Tuple[float, List[str], str]:
-        """Search using semantic similarity."""
-        
-        if not self.embedding_service:
+        """Search using semantic similarity against a precomputed source-sentence index."""
+
+        if not self.embedding_service or not source_sentence_index:
             return 0.0, [], ""
-        
+
         try:
-            # Embed claim
             claim_embedding = self.embedding_service.embed_text(claim)
-            
+
             best_score = 0.0
             best_source = ""
             best_evidence = ""
-            matching_sources = []
-            
-            for source in sources:
-                content = source.get("content") or source.get("text") or ""
-                if not content:
-                    continue
-                
-                # Split source into sentences and embed each
-                source_sentences = self._extract_sentences(content)
-                
-                for sentence in source_sentences:
-                    if len(sentence.split()) < 3:  # Skip very short
-                        continue
-                    
-                    sentence_embedding = self.embedding_service.embed_text(sentence)
-                    
-                    # Calculate cosine similarity
-                    similarity = self.embedding_service.cosine_similarity(
-                        claim_embedding,
-                        sentence_embedding
-                    )
-                    
-                    if similarity > best_score:
-                        best_score = similarity
-                        best_source = source.get("url") or source.get("title") or "Unknown"
-                        best_evidence = sentence
-                
-                if best_score > 0.7:
-                    matching_sources.append(best_source)
-            
+
+            for source_ref, sentence, sentence_embedding in source_sentence_index:
+                similarity = self.embedding_service.cosine_similarity(
+                    claim_embedding,
+                    sentence_embedding
+                )
+                if similarity > best_score:
+                    best_score = similarity
+                    best_source = source_ref
+                    best_evidence = sentence
+
+            matching_sources = [best_source] if best_score > 0.7 else []
             return best_score, matching_sources, best_evidence
-            
+
         except Exception as e:
             logger.warning(f"Semantic search failed: {e}")
             return 0.0, [], ""

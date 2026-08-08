@@ -28,4 +28,11 @@ class FallbackSearchTool(BaseSearchTool):
 
         # 🔁 fallback always DuckDuckGo
         logger.info("Using fallback search: DuckDuckGo")
-        return self.fallback.search(query, **kwargs)
+        try:
+            return self.fallback.search(query, **kwargs)
+        except Exception as e:
+            logger.error(
+                "Both %s and DuckDuckGo fallback failed for query %r: %s",
+                self.primary.provider_name(), query, e,
+            )
+            raise

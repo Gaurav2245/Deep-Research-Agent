@@ -1,5 +1,3 @@
-version: '3.9'
-
 services:
   # PostgreSQL Database with pgvector extension
   postgres:
@@ -33,10 +31,14 @@ services:
       DB_HOST: postgres
       DB_PORT: 5432
       DB_NAME: deep_research_db
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
       TAVILY_API_KEY: ${TAVILY_API_KEY}
       AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY}
       AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT}
+      AZURE_OPENAI_DEPLOYMENT_NAME: ${AZURE_OPENAI_DEPLOYMENT_NAME:-gpt-4o}
+      AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME: ${AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME:-text-embedding-3-small}
+      AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-2024-02-01}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:8501}
+      API_KEY: ${API_KEY:-}
       LOG_LEVEL: INFO
     ports:
       - "8080:8000"

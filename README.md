@@ -6,7 +6,10 @@ A modular research assistant built with LangGraph, Azure OpenAI, and multiple se
 
 - Runs a multi-step research workflow with search, scraping, and synthesis
 - Supports Tavily, DuckDuckGo, Playwright-based scraping, and NSE market data queries
+- Auto-detects Indian stock-market queries (nifty/sensex/gainers/losers/banknifty) and routes them to live NSE data instead of generic web search
+- Runs each round's search queries and deep-scrapes concurrently to cut wall-clock latency
 - Exposes the workflow through a CLI, a FastAPI backend, and a Streamlit UI
+- Exports any completed research session as a PDF report via the API or the UI
 - Keeps the provider layer loosely coupled so different search/scraping implementations can be swapped in
 
 ## Main entry points
@@ -46,28 +49,18 @@ A modular research assistant built with LangGraph, Azure OpenAI, and multiple se
    playwright install chromium
    ```
 
-3. Create a local environment file
+3. Create a local environment file from the template and fill in your credentials
    ```bash
-   copy NUL .env
+   cp .env.example .env      # Windows: copy .env.example .env
    ```
 
-4. Add the required environment variables to [.env](.env)
-   ```env
-   AZURE_OPENAI_API_KEY=your_key
-   AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
-   AZURE_OPENAI_DEPLOYMENT_NAME=gpt-4o
-   TAVILY_API_KEY=your_tavily_key
-   ```
-
-   Optional variables:
-   ```env
-   SEARCH_PROVIDER=tavily
-   LLM_PROVIDER=azure_openai
-   ENABLE_SCRAPER=true
-   SCRAPER_MAX_URLS=3
-   RESEARCH_DEPTH=deep
-   MAX_SEARCH_ITERATIONS=3
-   ```
+   [.env.example](.env.example) documents every variable the app reads (required and optional), including:
+   - `AZURE_OPENAI_API_KEY` / `AZURE_OPENAI_ENDPOINT` / `TAVILY_API_KEY` — required
+   - `ALLOWED_ORIGINS` — CORS allow-list for the API (defaults to local dev ports)
+   - `API_KEY` — if set, all `/api/v1/*` requests must send it in the `X-API-Key` header; leave unset for local dev (no auth enforced)
+   - `RATE_LIMIT_REQUESTS` / `RATE_LIMIT_WINDOW_SECONDS` — per-client-IP rate limit (default: 120 req/60s); set `RATE_LIMIT_REQUESTS=0` to disable
+   - `ENABLE_NSE_AUTO_ROUTING` — auto-route Indian market-data queries to NSE's live API (default: on)
+   - `DB_USER` / `DB_PASSWORD` / `DB_HOST` / `DB_PORT` / `DB_NAME` — Postgres connection (defaults match `docker-compose.yml`)
 
 ## Run the CLI
 
@@ -95,31 +88,46 @@ Then open:
 - http://localhost:8000/docs
 - http://localhost:8000/health
 
+Once a research session completes, download its PDF report with `GET /api/v1/research/{id}/pdf`.
+
 ## Run the Streamlit UI
 
 ```bash
 streamlit run streamlit_app.py
 ```
 
+## Run the tests
+
+```bash
+pytest
+```
+
+Covers LangGraph routing decisions, data validation, confidence/source scoring, NSE query routing, and every API route (including auth gating and rate limiting) via `TestClient` with the database dependency faked out. None of it needs network access, a real database, or API keys, so it runs the same locally and in CI. GitHub Actions runs the full suite on every push/PR to `main` ([.github/workflows/tests.yml](.github/workflows/tests.yml)).
+
 ## Project layout
 
 ```text
-agents/          Research workflow and agent nodes
-api/             FastAPI routes and schemas
+agents/          LangGraph workflow: query understanding, search, scraping,
+                 scoring, synthesis, validation, and DB persistence nodes
+api/             FastAPI routes, schemas, and optional API-key auth
 config/          Environment/configuration handling
-database/       Persistence, scoring, and validation logic
+database/        Models, confidence/source scoring, embeddings, and
+                 data validation logic
 llm/             LLM provider wrappers
 tools/           Search, scraping, and NSE adapters
 utils/           Logging, PDF generation, and helpers
+tests/           Pytest suite for pure-logic modules
 ```
 
 ## Notes
 
 - The app can work with search-only flows, but Playwright-based scraping is enabled by default for JS-heavy sites.
 - The FastAPI backend and Streamlit UI both depend on the same underlying research engine.
+- Source scoring, confidence scoring, and data-quality validation run as part of the LangGraph pipeline itself (`agents/enhanced_nodes.py`) and are persisted to the same `Research` row the API returns.
+- NSE auto-routing (`tools/nse_router_tool.py`, `tools/query_router.py`) is deliberately conservative: it only fires for queries anchored to a recognizable Indian-market token (nifty/sensex/nse/bse/banknifty) and always falls back to normal web search if NSE itself fails.
+- Rate limiting is in-memory and per-process — fine for a single API instance, but won't coordinate limits across multiple replicas. Swap `api/rate_limit.py` for a Redis-backed limiter before scaling horizontally.
 - If you are running the API locally, [quick_start.py](quick_start.py) can be used as a simple smoke test once the server is up.
-- **Quick Help?** → `QUICK_REFERENCE.md`
 
 ---
 
-**Version 2.0.0** | Production Ready | Last Updated: 2026-04-30
+**Version 2.0.0** | Last Updated: 2026-08-07

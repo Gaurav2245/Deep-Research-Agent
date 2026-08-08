@@ -1,5 +1,5 @@
 """Database module for Deep Research Agent."""
-from .connection import get_db, init_db, engine, SessionLocal, apply_research_schema_patches
+from .connection import get_db, init_db, session_scope, engine, SessionLocal, apply_research_schema_patches
 from .models import (
     Base, 
     Research, 
@@ -15,6 +15,7 @@ from .models import (
 __all__ = [
     "get_db",
     "init_db",
+    "session_scope",
     "apply_research_schema_patches",
     "engine",
     "SessionLocal",

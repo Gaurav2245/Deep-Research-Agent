@@ -8,8 +8,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from database import get_db, Conversation, Message, ConversationState, ConversationalKnowledge
-from agents.orchestration import ConversationOrchestrator
+from database import get_db, Conversation, Message, ConversationState
 from api.schemas import (
     ConversationCreate,
     ConversationResponse,
@@ -18,10 +17,6 @@ from api.schemas import (
     MessageResponse,
     ConversationQueryRequest,
     ConversationQueryResponse,
-    ConversationMemoryStats,
-    MemoryRetrievalInfo,
-    ResolutionInfo,
-    ExtractedFact,
 )
 from utils.logger import get_logger
 
@@ -145,123 +140,43 @@ def query_conversation(
     db: Session = Depends(get_db)
 ):
     """
-    Process a query in a conversation with layered memory support.
-    
-    Flow:
-    1. Store user message
-    2. Load conversation state
-    3. Resolve follow-up references (pronouns, ellipsis)
-    4. Retrieve from memory (ConversationalKnowledge)
-    5. Decide: use memory only or perform external research
-    6. Generate response
-    7. Extract knowledge from response
-    8. Store assistant message + facts
-    
-    Returns:
-    - Assistant response
-    - Memory coverage score
-    - Resolved entities and references
-    - Extracted facts
-    - Whether external research was performed
+    Process a query in a conversation.
+
+    Stores the user message, runs the research agent, stores the assistant
+    reply, and returns it.
     """
+    start = datetime.utcnow()
     try:
-        # Verify conversation exists
         conversation = db.query(Conversation).filter_by(id=conversation_id).first()
         if not conversation:
             raise HTTPException(status_code=404, detail="Conversation not found")
-        
-        # Initialize orchestrator (coordinates all memory layers)
-        orchestrator = ConversationOrchestrator(db)
-        
-        # STEP 1-4: begin_turn handles:
-        # - Store user message
-        # - Load/update conversation state
-        # - Resolve follow-up references
-        # - Retrieve from memory
-        turn_ctx = orchestrator.begin_turn(
+
+        db.add(Message(conversation_id=conversation_id, role="user", content=request.query))
+
+        assistant_content = _run_research_for_query(request.query)
+
+        assistant_message = Message(
             conversation_id=conversation_id,
-            user_query=request.query
+            role="assistant",
+            content=assistant_content,
         )
-        
-        # STEP 5: Get memory results for decision-making
-        memory_results = orchestrator.get_memory_results()
-        resolution_results = orchestrator.get_resolution_result()
-        
-        # Determine if we need to research
-        should_research = (
-            request.perform_research 
-            if request.perform_research is not None 
-            else orchestrator.should_research()
-        )
-        
-        logger.info(
-            f"Query received | conv={conversation_id} | "
-            f"memory_coverage={memory_results['memory_coverage']:.1%} | "
-            f"should_research={should_research}"
-        )
-        
-        # STEP 6: Generate response
-        # This is where you integrate with your existing research agent
-        if should_research:
-            # TODO: Integrate with your existing research graph/agent
-            # For now, we'll use a placeholder that indicates research is needed
-            assistant_response = generate_response_with_research(
-                query=request.query,
-                memory_context=memory_results.get("memory_context", ""),
-                entities=resolution_results.get("active_entities", []),
-            )
-            research_performed = True
-        else:
-            # Answer directly from memory
-            assistant_response = generate_response_from_memory(
-                query=request.query,
-                memory_context=memory_results.get("memory_context", ""),
-                entities=memory_results.get("retrieved_entities", []),
-            )
-            research_performed = False
-        
-        # STEP 7-8: end_turn handles:
-        # - Extract knowledge from response
-        # - Store assistant message
-        # - Update conversation metadata
-        turn_ctx = orchestrator.end_turn(assistant_response)
-        
-        # Build response
-        extracted_facts = [
-            ExtractedFact(
-                entity=f["entity"],
-                attribute=f["attribute"],
-                value=f["value"],
-                confidence=f["confidence"],
-            )
-            for f in turn_ctx.extracted_facts
-        ]
-        
-        memory_info = MemoryRetrievalInfo(
-            should_use_memory=memory_results["should_use_memory"],
-            memory_coverage=memory_results["memory_coverage"],
-            retrieved_entities=memory_results["retrieved_entities"],
-            num_facts=memory_results["memory_coverage"] * 10,  # Approximate
-        )
-        
-        resolution_info = ResolutionInfo(
-            is_follow_up=resolution_results["is_follow_up"],
-            resolved_references=resolution_results["resolved_references"],
-            primary_entity=resolution_results["primary_entity"],
-            active_entities=resolution_results["active_entities"],
-            resolution_confidence=resolution_results["resolution_confidence"],
-        )
-        
+        db.add(assistant_message)
+
+        conversation.message_count = (conversation.message_count or 0) + 2
+        conversation.research_count = (conversation.research_count or 0) + 1
+        conversation.updated_at = datetime.utcnow()
+
+        db.commit()
+        db.refresh(assistant_message)
+
+        elapsed_ms = (datetime.utcnow() - start).total_seconds() * 1000
+
         return ConversationQueryResponse(
-            assistant_message_id=turn_ctx.assistant_message_id,
-            content=assistant_response,
-            memory_info=memory_info,
-            resolution_info=resolution_info,
-            facts_extracted=extracted_facts,
-            research_performed=research_performed,
-            elapsed_ms=turn_ctx.elapsed_ms() or 0.0,
+            assistant_message_id=assistant_message.id,
+            content=assistant_content,
+            elapsed_ms=elapsed_ms,
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -269,115 +184,21 @@ def query_conversation(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/conversations/{conversation_id}/memory-stats", response_model=ConversationMemoryStats)
-def get_memory_stats(
-    conversation_id: UUID,
-    db: Session = Depends(get_db)
-):
-    """
-    Get memory statistics and utilization for a conversation.
-    
-    Shows:
-    - Number of turns
-    - Entities tracked
-    - Facts extracted
-    - Memory efficiency (how often queries were answered from memory)
-    """
-    try:
-        # Verify conversation exists
-        conversation = db.query(Conversation).filter_by(id=conversation_id).first()
-        if not conversation:
-            raise HTTPException(status_code=404, detail="Conversation not found")
-        
-        orchestrator = ConversationOrchestrator(db)
-        summary = orchestrator.get_conversation_summary(conversation_id)
-        
-        return ConversationMemoryStats(
-            conversation_id=conversation_id,
-            total_turns=summary.get("total_turns", 0),
-            active_entities=summary.get("active_entities", []),
-            unique_entities=summary.get("unique_entities", 0),
-            facts_extracted=summary.get("facts_extracted", 0),
-            top_topics=summary.get("top_topics", []),
-            memory_efficiency=summary.get("memory_efficiency", 0.0),
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting memory stats for {conversation_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ============================================================================
-# HELPER FUNCTIONS (integrate with your research agent)
-# ============================================================================
-
-def generate_response_from_memory(
-    query: str,
-    memory_context: str,
-    entities: List[str],
-) -> str:
-    """
-    Generate response using only memory (no external research).
-    """
-    if not memory_context:
-        return f"I don't have information about '{query}' in our conversation yet."
-    
-    try:
-        from llm.factory import create_llm
-        from config import get_agent_config
-        
-        cfg = get_agent_config()
-        llm = create_llm(cfg)
-        
-        prompt = f"""Based on the information from our conversation history below, answer this question: {query}
-
-Conversation context (prior facts and answers):
-{memory_context}
-
-Entities in scope: {', '.join(entities) if entities else 'none'}
-
-Answer the question directly using only the provided context. If the context doesn't fully answer the question, answer what you can. Do not speculate or add external information not found in the context."""
-        
-        response = llm.invoke(prompt)
-        return response.content
-        
-    except Exception as e:
-        logger.error(f"Error in generate_response_from_memory: {e}")
-        return f"[MEMORY ERROR] I have the information but failed to format it: {memory_context[:200]}..."
-
-
-def generate_response_with_research(
-    query: str,
-    memory_context: str,
-    entities: List[str],
-    conversation_id: UUID = None,
-) -> str:
-    """
-    Generate response with external research.
-    
-    Called when memory coverage is insufficient (<0.7).
-    """
+def _run_research_for_query(query: str) -> str:
+    """Run the research agent for a conversational query and return its answer text."""
     try:
         from main import run_research
-        from agents.state import ResearchState
-        
+
         logger.info(f"[API] Running research for: {query}")
-        
-        # We can pass the conversation_id and context to the research agent
-        # so it has access to history and prior knowledge.
-        
-        # For now, let's keep it simple and just run the research graph
         result = run_research(query)
-        
+
         if result.error:
             return f"I encountered an error while researching: {result.error}"
-            
+
         return result.final_answer or "I couldn't find a clear answer to that."
-        
+
     except Exception as e:
-        logger.error(f"Error in generate_response_with_research: {e}", exc_info=True)
+        logger.error(f"Error running research for query: {e}", exc_info=True)
         return f"I'm sorry, I ran into an issue while researching that topic: {str(e)}"
 
 
@@ -416,7 +237,7 @@ def add_message(
         conversation.message_count = db.query(Message).filter(
             Message.conversation_id == conversation_id
         ).count() + 1
-        conversation.updated_at = __import__('datetime').datetime.utcnow()
+        conversation.updated_at = datetime.utcnow()
         
         db.commit()
         db.refresh(message)

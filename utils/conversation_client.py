@@ -6,19 +6,26 @@ from typing import Optional, List, Dict, Any
 from uuid import UUID
 import json
 
-API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8080/api/v1")
+# Matches `uvicorn api.main:app` run locally (port 8000). If you're pointing at the
+# docker-compose stack instead (which maps the API to host port 8080), set
+# API_BASE_URL=http://localhost:8080/api/v1 in your environment.
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000/api/v1")
 
 
 class ConversationClient:
     """Client for interacting with conversation API."""
-    
+
     def __init__(self, base_url: str = API_BASE_URL):
         self.base_url = base_url
-    
+        self.session = requests.Session()
+        api_key = os.getenv("API_KEY")
+        if api_key:
+            self.session.headers.update({"X-API-Key": api_key})
+
     def check_health(self) -> bool:
         """Check if API is reachable."""
         try:
-            response = requests.get(f"{self.base_url.replace('/api/v1', '')}/health", timeout=5)
+            response = self.session.get(f"{self.base_url.replace('/api/v1', '')}/health", timeout=5)
             return response.status_code == 200
         except Exception as e:
             print(f"[ConvClient] Health check failed: {e}")
@@ -29,7 +36,7 @@ class ConversationClient:
         try:
             data = {"title": title or "New Chat", "user_id": user_id}
             print(f"[ConvClient] Creating conversation with data: {data}")
-            response = requests.post(f"{self.base_url}/conversations", json=data, timeout=10)
+            response = self.session.post(f"{self.base_url}/conversations", json=data, timeout=10)
             print(f"[ConvClient] Response status: {response.status_code}")
             response.raise_for_status()
             result = response.json()
@@ -51,7 +58,7 @@ class ConversationClient:
             if user_id:
                 params["user_id"] = user_id
             print(f"[ConvClient] Fetching conversations with params: {params}")
-            response = requests.get(f"{self.base_url}/conversations", params=params, timeout=10)
+            response = self.session.get(f"{self.base_url}/conversations", params=params, timeout=10)
             print(f"[ConvClient] Response status: {response.status_code}")
             response.raise_for_status()
             result = response.json()
@@ -71,7 +78,7 @@ class ConversationClient:
     def get_conversation(self, conversation_id: str) -> Optional[Dict]:
         """Get a specific conversation with all messages."""
         try:
-            response = requests.get(f"{self.base_url}/conversations/{conversation_id}")
+            response = self.session.get(f"{self.base_url}/conversations/{conversation_id}")
             response.raise_for_status()
             return response.json()
         except Exception as e:
@@ -94,7 +101,7 @@ class ConversationClient:
                 "research_id": research_id,
                 "context_data": metadata,
             }
-            response = requests.post(
+            response = self.session.post(
                 f"{self.base_url}/conversations/{conversation_id}/messages",
                 json=data
             )
@@ -113,7 +120,7 @@ class ConversationClient:
         """Get messages from a conversation."""
         try:
             params = {"limit": limit, "offset": offset}
-            response = requests.get(
+            response = self.session.get(
                 f"{self.base_url}/conversations/{conversation_id}/messages",
                 params=params
             )
@@ -127,7 +134,7 @@ class ConversationClient:
         """Update conversation title."""
         try:
             params = {"title": title}
-            response = requests.put(
+            response = self.session.put(
                 f"{self.base_url}/conversations/{conversation_id}",
                 params=params
             )
@@ -140,7 +147,7 @@ class ConversationClient:
     def delete_conversation(self, conversation_id: str) -> bool:
         """Delete a conversation."""
         try:
-            response = requests.delete(f"{self.base_url}/conversations/{conversation_id}")
+            response = self.session.delete(f"{self.base_url}/conversations/{conversation_id}")
             response.raise_for_status()
             return True
         except Exception as e:

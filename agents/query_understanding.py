@@ -42,7 +42,7 @@ def _format_chat_history(history: list[dict]) -> str:
         return "No previous conversation."
     formatted = []
     for msg in history:
-        role = "User" if msg["role"] == "user" else "Assistant"
+        role = "User" if msg.get("role") == "user" else "Assistant"
         content = msg.get("content") or "[No content]"
         formatted.append(f"{role}: {content}")
     return "\n".join(formatted)

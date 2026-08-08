@@ -19,6 +19,7 @@ from datetime import datetime
 from langchain_core.language_models import BaseChatModel
 from sqlalchemy.orm import Session
 
+from agents._shared import format_context as _format_context, parse_json_list as _parse_json_list
 from agents.state import ResearchState
 from config import AgentConfig, ResearchDepth, get_agent_config
 from database import SessionLocal, Research, Source
@@ -51,35 +52,6 @@ def _json_safe_validation_rows(results: list | None) -> list:
                 clean[k] = str(v)[:4000]
         out.append(clean)
     return out
-
-
-# Helper Functions
-
-def _parse_json_list(text: str) -> List[str]:
-    """Safely parse a JSON array from an LLM response."""
-    text = text.strip()
-    for fence in ("```json", "```"):
-        text = text.removeprefix(fence).removesuffix("```").strip()
-    try:
-        parsed = json.loads(text)
-        if isinstance(parsed, list):
-            return [str(item) for item in parsed]
-    except json.JSONDecodeError:
-        logger.warning("Could not parse JSON list from LLM output: %r", text)
-    return []
-
-
-def _format_context(responses: List[SearchResponse]) -> str:
-    """Flatten search results into a single readable context string."""
-    chunks: List[str] = []
-    for resp in responses:
-        for r in resp.results:
-            chunks.append(
-                f"### {r.title}\nURL: {r.url}\n\n{r.content}\n"
-            )
-        if resp.answer:
-            chunks.append(f"### Direct answer from search\n{resp.answer}\n")
-    return "\n---\n".join(chunks)
 
 
 # Enhanced Nodes
@@ -162,29 +134,10 @@ def make_source_scorer_node(config: AgentConfig | None = None) -> NodeFn:
             
             # Fallback to context-aware regex if metadata is missing
             if not date_str:
-                import re
-                snippet = res["content"][:2000]
-                
-                # 1. Look for full dates like "May 15, 2026" or "15 May 2026" or "2026-05-15"
-                # This is much more precise than just a 4-digit year.
-                full_date_match = re.search(
-                    r"(?:published|updated|posted|on|dated)\s*(?::|on)?\s*"
-                    r"(\b(?:\d{1,2}[-/th\s]+)?(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[-/th\s]+\d{1,2}(?:[-/th\s]+\d{2,4})?\b|"
-                    r"\b\d{4}-\d{1,2}-\d{1,2}\b|"
-                    r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+\d{4}\b)", 
-                    snippet, re.IGNORECASE
-                )
-                
-                if full_date_match:
-                    date_str = full_date_match.group(1)
-                    source_type = "full_date_regex"
-                else:
-                    # 2. Fallback to year-only with context
-                    year_match = re.search(r"(?:published|updated|date|posted|on|modified)\s*(?::|on)?\s*\b(202[0-9])\b", snippet, re.IGNORECASE)
-                    if year_match:
-                        date_str = year_match.group(1)
-                        source_type = "year_regex"
-            
+                date_str = SourceScorer.extract_date_from_content(res["content"])
+                if date_str:
+                    source_type = "content_regex"
+
             logger.info(f"[SourceScorer] Date detection for {res['url'][:30]}...: found {date_str} via {source_type}")
             
             freshness = SourceScorer.score_content_freshness(date_str)
@@ -601,10 +554,3 @@ def make_database_persistence_node(db_session: Session | None = None) -> NodeFn:
         return state
 
     return database_persistence_node
-
-
-# State Extensions
-
-def extend_research_state():
-    
-    pass
