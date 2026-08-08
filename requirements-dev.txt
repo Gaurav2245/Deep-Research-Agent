@@ -1,5 +1,0 @@
-# Extra dependencies for running the test suite / contributing.
-# Not needed to just run the app — see requirements.txt for that.
--r requirements.txt
-
-pytest>=8.0.0

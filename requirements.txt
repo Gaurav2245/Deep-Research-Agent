@@ -52,5 +52,3 @@ langsmith>=0.1.0                 # LangChain tracing and observability
 # ── Post-install step (run once after pip install) ────────────────────────────
 # playwright install chromium
 
-# ── Development / testing ──────────────────────────────────────────────────────
-# Not needed to run the app. See requirements-dev.txt.

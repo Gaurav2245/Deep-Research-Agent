@@ -96,17 +96,6 @@ Once a research session completes, download its PDF report with `GET /api/v1/res
 streamlit run streamlit_app.py
 ```
 
-## Run the tests
-
-Test dependencies (`pytest`) are kept out of `requirements.txt` so just running the app doesn't pull them in — install them separately first:
-
-```bash
-pip install -r requirements-dev.txt
-pytest
-```
-
-Covers LangGraph routing decisions, data validation, confidence/source scoring, NSE query routing, and every API route (including auth gating and rate limiting) via `TestClient` with the database dependency faked out. None of it needs network access, a real database, or API keys, so it runs the same locally and in CI. GitHub Actions runs the full suite on every push/PR to `main` ([.github/workflows/tests.yml](.github/workflows/tests.yml)).
-
 ## Project layout
 
 ```text
@@ -119,7 +108,6 @@ database/        Models, confidence/source scoring, embeddings, and
 llm/             LLM provider wrappers
 tools/           Search, scraping, and NSE adapters
 utils/           Logging, PDF generation, and helpers
-tests/           Pytest suite for pure-logic modules
 ```
 
 ## Notes
