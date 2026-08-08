@@ -49,8 +49,8 @@ validators>=0.22.0               # Data validators
 bleach>=6.1.0                    # HTML sanitization
 langsmith>=0.1.0                 # LangChain tracing and observability
 
-# ── Testing (dev only) ─────────────────────────────────────────────────────────
-pytest>=8.0.0
-
 # ── Post-install step (run once after pip install) ────────────────────────────
 # playwright install chromium
+
+# ── Development / testing ──────────────────────────────────────────────────────
+# Not needed to run the app. See requirements-dev.txt.

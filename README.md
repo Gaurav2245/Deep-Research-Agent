@@ -98,7 +98,10 @@ streamlit run streamlit_app.py
 
 ## Run the tests
 
+Test dependencies (`pytest`) are kept out of `requirements.txt` so just running the app doesn't pull them in — install them separately first:
+
 ```bash
+pip install -r requirements-dev.txt
 pytest
 ```
 
